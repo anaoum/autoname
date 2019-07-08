@@ -6,6 +6,8 @@ import argparse
 import configparser
 import os.path
 import os
+import threading
+import queue
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -17,13 +19,17 @@ LOG_FMT = '%(name)s [%(process)d]: %(asctime)s: %(levelname)s: %(message)s'
 
 class SyphtFSEventHandler(FileSystemEventHandler):
     def __init__(self, sypht_client, abr_client, output_dir,
-            extensions={".pdf"}, *args, **kwargs):
+            extensions={".pdf"}, max_jobs=100, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.sypht_client = sypht_client
         self.abr_client = abr_client
         self.output_dir = output_dir
         self.extensions = extensions
         self.logger = logging.getLogger(type(self).__name__)
+        self.job_queue = queue.Queue(maxsize=max_jobs)
+        self.running = True
+        self.worker_thread = threading.Thread(target=self.worker)
+        self.worker_thread.start()
     def on_created(self, event):
         self.logger.info("Received create event for %s.", event.src_path)
         if event.is_directory or \
@@ -31,31 +37,40 @@ class SyphtFSEventHandler(FileSystemEventHandler):
             self.logger.info("Skipping %s.", event.src_path)
             return
         try:
-            self.process(event.src_path)
+            with open(event.src_path, "rb") as f:
+                fid = self.sypht_client.upload(f, fieldsets=["document"])
+                self.logger.info("Sent %s to Sypht.", os.path.basename(event.src_path))
+            self.job_queue.put((fid, event.src_path))
         except Exception as e:
             self.logger.error("Could not process %s. Exception occurred: %s", 
                     event.src_path, e)
-    def process(self, filename):
-        with open(filename, "rb") as f:
-            fid = self.sypht_client.upload(f, fieldsets=["document"])
-            self.logger.info("Sent %s to Sypht.", os.path.basename(filename))
+    def stop(self):
+        self.running = False
+        self.worker_thread.join()
+    def worker(self):
+        while self.running:
+            try:
+                fid, filename = self.job_queue.get(timeout=1)
+                self.process(fid, filename)
+            except queue.Empty:
+                continue
+    def process(self, fid, filename):
         results = self.sypht_client.fetch_results(fid)
         doc_date = results.get("document.date", None)
         doc_abn = results.get("document.supplierABN", None)
         if doc_date is None:
-            self.logger.warning("Could not obtain date from document. Skipping")
+            self.logger.warning("Could not obtain date from %s. Skipping.", filename)
             return
         if doc_abn is None:
-            self.logger.warning("Could not obtain ABN from document. Skipping")
+            self.logger.warning("Could not obtain ABN from %s. Skipping.", filename)
             return
-        self.logger.info("Document date: %s, supplier ABN: %s.", 
-                doc_date, doc_abn)
+        self.logger.info("%s: date %s, supplier ABN %s.", filename, doc_date, doc_abn)
         supplier_name = self.abr_client.lookup_name(doc_abn)
         if supplier_name is None:
-            self.logger.warning("Could not obtain supplier name. Skipping")
+            self.logger.warning("Could not obtain supplier name from %s. Skipping.", filename)
             return
         supplier_name = self.abr_client.remove_suffixes(supplier_name)
-        self.logger.info("Supplier name: %s.", supplier_name)
+        self.logger.info("%s: supplier name %s.", filename, supplier_name)
         new_filename = self.get_name(doc_date, supplier_name,
                 os.path.splitext(filename)[1])
         self.logger.info("Moving %s to %s.", filename, new_filename)
@@ -99,4 +114,5 @@ if __name__ == "__main__":
             time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()
+        event_handler.stop()
     observer.join()
