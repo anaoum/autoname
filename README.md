@@ -1,5 +1,5 @@
 # Autoname
-Automatically renames PDF documents in a watched directory according to the extracted date and supplier name. The date and supplier ABN are extracted using the Sypht API, and the supplier name is derived from the ABN using the Australian Business Register's web services.
+Autoname automatically renames PDF documents in a watched directory based on the extracted date and supplier name. The date and supplier ABN are extracted using the Sypht API, and the supplier name is derived from the ABN using the Australian Business Register's web services.
 
 ## Requirements
 * Python 3
@@ -30,7 +30,7 @@ ABR_GUID = FIXME
 Output = /dev/stderr
 Level = INFO
 ```
-Other than the logging settings, you will need to change all the values.
+You will need to change all the values other than the logging settings.
 
 ## Running
 ```bash
